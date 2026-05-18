@@ -11,7 +11,9 @@ Pasarela de pago oficial de [QvaPay](https://www.qvapay.com) para tiendas WooCom
 - Integración directa con la API v2 de merchants de QvaPay.
 - Verificación criptográfica del webhook (HMAC-SHA256) con ventana anti-replay de ±5 minutos.
 - Idempotencia: pedidos ya procesados no se duplican aunque QvaPay reintente la entrega.
+- Compatible con **checkout clásico** y con **WooCommerce Blocks** (Cart/Checkout block).
 - Compatibilidad declarada con WooCommerce HPOS (Custom Order Tables).
+- Override opcional de la URL del webhook para sitios tras proxy/túnel (Cloudflare Tunnel, ngrok).
 - Modo debug opcional que registra peticiones y webhooks en *WooCommerce → Status → Logs* (`source: qvapay`).
 - Aviso en el admin cuando la tienda no está en USD o no se sirve por HTTPS.
 
@@ -75,7 +77,8 @@ Los ajustes viven en la opción `woocommerce_qvapay_settings`:
 | `description` | Descripción mostrada bajo el título.                                        |
 | `app_id`      | UUID de tu app en `https://www.qvapay.com/dev/app`.                         |
 | `app_secret`  | Clave secreta de tu app. Se usa también para verificar la firma del webhook. |
-| `webhook_url` | URL de webhook (solo lectura) para copiar al *Callback URL* de tu app.      |
+| `webhook_url_override` | Opcional. Dominio público (o URL completa) a usar como webhook. Útil tras proxy/túnel (Cloudflare Tunnel, ngrok). Vacío = autodetectar. |
+| `webhook_url` | URL de webhook efectiva (solo lectura). Es la que se envía a QvaPay y la que debes copiar al *Callback URL*. |
 | `debug`       | Registra peticiones y webhooks en *WooCommerce → Status → Logs*.            |
 
 Estado por pedido: el UUID de la factura QvaPay se guarda en el meta `_qvapay_transaction_uuid`.
@@ -95,11 +98,9 @@ Solo flujo de **invoice + redirect**. **No** incluye:
 - Reembolsos (la API de QvaPay no expone aún un endpoint público de refunds).
 - Suscripciones recurrentes (`authorize_payments` / `charge`).
 - Entorno sandbox.
-- Integración con WooCommerce Blocks (el checkout clásico sí funciona).
 
 ## Roadmap
 
-- **1.1.0** — Soporte para WooCommerce Blocks.
 - **Futuro** — Reembolsos automáticos cuando QvaPay exponga un endpoint público; suscripciones vía `authorize_payments` + `charge`.
 
 ## Estructura del proyecto
@@ -108,13 +109,16 @@ Solo flujo de **invoice + redirect**. **No** incluye:
 qvapay-for-woocommerce.php       Punto de entrada del plugin, constantes y bootstrap.
 uninstall.php                    Borra woocommerce_qvapay_settings al desinstalar.
 includes/
-  class-qvapay-plugin.php        Singleton: registra gateway, rutas REST, action links.
-  class-qvapay-gateway.php       WC_Payment_Gateway: settings, is_available, process_payment.
-  class-qvapay-api-client.php    Wrapper HTTP de la API v2 de merchants.
-  class-qvapay-webhook.php       REST: /wp-json/qvapay/v1/webhook (verificación HMAC).
-  class-qvapay-logger.php        Wrapper de wc_get_logger() (source: qvapay).
+  class-qvapay-plugin.php             Singleton: registra gateway, rutas REST, action links, Blocks.
+  class-qvapay-gateway.php            WC_Payment_Gateway: settings, is_available, process_payment.
+  class-qvapay-api-client.php         Wrapper HTTP de la API v2 de merchants.
+  class-qvapay-webhook.php            REST: /wp-json/qvapay/v1/webhook (verificación HMAC).
+  class-qvapay-blocks-integration.php Wire-up del Payment Method Type para Blocks (lazy).
+  class-qvapay-blocks-method.php      AbstractPaymentMethodType para WooCommerce Blocks.
+  class-qvapay-logger.php             Wrapper de wc_get_logger() (source: qvapay).
 assets/
   images/icon.svg                Icono mostrado en el checkout.
+  js/checkout-blocks.js          Registro del método en el Cart/Checkout block (vanilla JS, sin build).
 languages/                       Catálogos .po/.mo (text-domain: qvapay-for-woocommerce).
 readme.txt                       Manifest estilo WordPress.org.
 build.sh                         Genera dist/qvapay-for-woocommerce-<ver>.zip.

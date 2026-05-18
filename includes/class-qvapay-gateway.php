@@ -6,11 +6,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 class QvaPay_Gateway extends WC_Payment_Gateway {
 
     const ORDER_META_TXN_UUID = '_qvapay_transaction_uuid';
+    const WEBHOOK_PATH        = '/wp-json/qvapay/v1/webhook';
 
     public function __construct() {
         $this->id                 = 'qvapay';
         $this->method_title       = __( 'QvaPay', 'qvapay-for-woocommerce' );
-        $this->method_description = __( 'Acepta pagos en USD a través de QvaPay. El cliente es redirigido al checkout alojado de QvaPay y vuelve a la tienda automáticamente al pagar.', 'qvapay-for-woocommerce' );
+        $this->method_description = __( 'Acepta pagos en USD a través de QvaPay.', 'qvapay-for-woocommerce' );
         $this->has_fields         = false;
         $this->supports           = array( 'products' );
         $this->icon               = QVAPAY_WC_PLUGIN_URL . 'assets/images/icon.svg';
@@ -49,7 +50,7 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
             'app_id'      => array(
                 'title'       => __( 'App ID', 'qvapay-for-woocommerce' ),
                 'type'        => 'text',
-                'description' => __( 'UUID de tu app en https://qvapay.com/dev/app.', 'qvapay-for-woocommerce' ),
+                'description' => __( 'UUID de tu app en https://www.qvapay.com/dev/app.', 'qvapay-for-woocommerce' ),
                 'default'     => '',
             ),
             'app_secret'  => array(
@@ -58,10 +59,17 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
                 'description' => __( 'Clave secreta de tu app. Se usa también para verificar la firma del webhook.', 'qvapay-for-woocommerce' ),
                 'default'     => '',
             ),
+            'webhook_url_override' => array(
+                'title'       => __( 'URL pública del webhook (override)', 'qvapay-for-woocommerce' ),
+                'type'        => 'text',
+                'description' => __( 'Opcional. Déjalo vacío para autodetectar a partir de la URL del sitio. Útil si tu WordPress está tras un proxy/túnel cuyo dominio público no coincide con la URL configurada (ej. Cloudflare Tunnel, ngrok). Acepta el dominio completo o sólo el host; el plugin añade /wp-json/qvapay/v1/webhook automáticamente.', 'qvapay-for-woocommerce' ),
+                'default'     => '',
+                'placeholder' => 'https://mi-tienda.trycloudflare.com',
+            ),
             'webhook_url' => array(
-                'title'             => __( 'URL de webhook', 'qvapay-for-woocommerce' ),
+                'title'             => __( 'URL de webhook efectiva', 'qvapay-for-woocommerce' ),
                 'type'              => 'text',
-                'description'       => __( 'Copia esta URL al campo "Callback URL" de tu app en QvaPay.', 'qvapay-for-woocommerce' ),
+                'description'       => __( 'Esta es la URL que se enviará a QvaPay y la que debes copiar al campo "Callback URL" de tu app. Se recalcula a partir del override (si está) o de la URL del sitio.', 'qvapay-for-woocommerce' ),
                 'default'           => '',
                 'custom_attributes' => array( 'readonly' => 'readonly' ),
             ),
@@ -73,7 +81,43 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
             ),
         );
 
-        $this->form_fields['webhook_url']['default'] = rest_url( 'qvapay/v1/webhook' );
+        $this->form_fields['webhook_url']['default'] = $this->get_webhook_url();
+    }
+
+    public function get_webhook_url() {
+        $override = trim( (string) $this->get_option( 'webhook_url_override', '' ) );
+
+        if ( '' === $override ) {
+            return rest_url( 'qvapay/v1/webhook' );
+        }
+
+        return self::normalize_webhook_url( $override );
+    }
+
+    public static function normalize_webhook_url( $value ) {
+        $value = trim( (string) $value );
+
+        if ( '' === $value ) {
+            return '';
+        }
+
+        if ( ! preg_match( '#^https?://#i', $value ) ) {
+            $value = 'https://' . $value;
+        }
+
+        $value = rtrim( $value, '/' );
+
+        if ( substr( $value, -strlen( self::WEBHOOK_PATH ) ) !== self::WEBHOOK_PATH ) {
+            $value .= self::WEBHOOK_PATH;
+        }
+
+        return $value;
+    }
+
+    public function validate_webhook_url_field( $key, $value ) {
+        // The effective URL is always derived from the override + site URL;
+        // ignore anything the browser submits for the readonly display field.
+        return $this->get_webhook_url();
     }
 
     public function admin_options() {
@@ -135,7 +179,7 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
             'amount'      => $amount,
             'description' => $description,
             'remote_id'   => (string) $order->get_id(),
-            'webhook'     => rest_url( 'qvapay/v1/webhook' ),
+            'webhook'     => $this->get_webhook_url(),
             'products'    => $this->build_products( $order ),
         );
 

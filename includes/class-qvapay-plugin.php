@@ -17,6 +17,7 @@ class QvaPay_Plugin {
     private function __construct() {
         add_filter( 'woocommerce_payment_gateways', array( $this, 'register_gateway' ) );
         add_action( 'rest_api_init', array( 'QvaPay_Webhook', 'register_routes' ) );
+        add_action( 'woocommerce_blocks_payment_method_type_registration', array( 'QvaPay_Blocks_Integration', 'register' ), 5 );
         add_filter( 'plugin_action_links_' . plugin_basename( QVAPAY_WC_PLUGIN_FILE ), array( $this, 'plugin_action_links' ) );
     }
 

@@ -10,17 +10,39 @@ Plain PHP loaded by WordPress — no `composer.json`, no `package.json`, no test
 
 ## Architecture
 
-Entry point `qvapay-for-woocommerce.php` defines plugin constants and, on `plugins_loaded`, requires the five classes under `includes/` in this order (the order matters — later classes reference earlier ones):
+Entry point `qvapay-for-woocommerce.php` defines plugin constants and, on `plugins_loaded`, requires these classes under `includes/` in this order (the order matters — later classes reference earlier ones):
 
 1. `QvaPay_Logger` — wraps `wc_get_logger()`, source `qvapay`. Non-error messages are dropped unless the gateway's `debug` setting is `yes`; errors always log.
 2. `QvaPay_Api_Client` — static HTTP client. POSTs JSON to `QVAPAY_WC_API_BASE` (`https://qvapay.com/api/v2`) with `app-id` / `app-secret` headers. Returns decoded array or `WP_Error`.
-3. `QvaPay_Gateway extends WC_Payment_Gateway` — checkout-facing gateway (id `qvapay`). Owns settings UI, `is_available()` guards (enabled + currency=USD + credentials present), and `process_payment()` which calls `create_invoice` and redirects to `QVAPAY_WC_CHECKOUT_BASE` + uuid.
+3. `QvaPay_Gateway extends WC_Payment_Gateway` — classic-checkout gateway (id `qvapay`). Owns settings UI, `is_available()` guards (enabled + currency=USD + credentials present), and `process_payment()` which calls `create_invoice` and redirects to `QVAPAY_WC_CHECKOUT_BASE` + uuid.
 4. `QvaPay_Webhook` — registers `POST /wp-json/qvapay/v1/webhook` (open `permission_callback`; auth is done by HMAC verification inside `handle()`).
-5. `QvaPay_Plugin` (singleton) — wires the gateway into `woocommerce_payment_gateways` and registers REST routes on `rest_api_init`.
+5. `QvaPay_Blocks_Integration` — wires the Blocks payment method type into the registry. The actual `AbstractPaymentMethodType` subclass (`QvaPay_Blocks_Method`) lives in its own file and is `require_once`'d **inside** `register()`, **not** at plugins_loaded — see "Blocks checkout" below.
+6. `QvaPay_Plugin` (singleton) — wires the gateway into `woocommerce_payment_gateways`, registers REST routes on `rest_api_init`, and hooks `QvaPay_Blocks_Integration::register` to `woocommerce_blocks_payment_method_type_registration` at priority 5.
 
-HPOS (custom order tables) compatibility is declared via `FeaturesUtil::declare_compatibility` on `before_woocommerce_init` in the main plugin file — keep order access going through `wc_get_order()` / `$order->get_meta()`, never direct postmeta.
+HPOS (custom order tables) and `cart_checkout_blocks` compatibility are both declared via `FeaturesUtil::declare_compatibility` on `before_woocommerce_init` in the main plugin file — keep order access going through `wc_get_order()` / `$order->get_meta()`, never direct postmeta.
+
+### Blocks checkout
+
+The classic gateway registration alone does **not** make the method appear in the WooCommerce Cart/Checkout block — Blocks ignores `WC_Payment_Gateway` subclasses unless a matching `AbstractPaymentMethodType` is also registered. `QvaPay_Blocks_Integration::register` is hooked **directly** to `woocommerce_blocks_payment_method_type_registration` (priority 5) — going through `woocommerce_blocks_loaded` is unreliable because Blocks may have already fired the registration phase by the time our `woocommerce_blocks_loaded` callback runs.
+
+`QvaPay_Blocks_Method` is in its own file `class-qvapay-blocks-method.php` and is `require_once`'d from inside `register()`, **not** at plugins_loaded. The abstract base class `Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType` may not exist yet when the main bootstrap runs at plugins_loaded — defining the subclass eagerly there silently no-ops and the entire Blocks integration disappears with no PHP error.
+
+The Blocks JS (`assets/js/checkout-blocks.js`) is intentionally minimal: no `onPaymentSetup` callback and no custom `paymentMethodData` — QvaPay doesn't need per-checkout data, just "pick QvaPay → submit → redirect". `canMakePayment` returns `true` unconditionally; gateway visibility is decided server-side by `QvaPay_Blocks_Method::is_active()` which mirrors `QvaPay_Gateway::is_available()`'s checks (enabled + USD + credentials).
+
+Required script deps: `wc-blocks-registry`, `wc-settings`, `wp-element`, `wp-html-entities`, `wp-i18n`. Missing `wc-settings` is what makes `getSetting('qvapay_data', {})` silently return empty. The data key is `<name>_data` derived from `protected $name = 'qvapay'`.
 
 Settings live in the single option `woocommerce_qvapay_settings` (deleted by `uninstall.php`). Per-order state is one meta key: `_qvapay_transaction_uuid` (constant `QvaPay_Gateway::ORDER_META_TXN_UUID`).
+
+### Webhook URL resolution
+
+Both the admin display field and the `webhook` field in the `create_invoice` payload route through `QvaPay_Gateway::get_webhook_url()`. It returns:
+
+- `rest_url('qvapay/v1/webhook')` when the `webhook_url_override` setting is empty (default).
+- `normalize_webhook_url($override)` otherwise — accepts a bare host (`mi-tienda.trycloudflare.com`) or full URL, prefixes `https://` if no scheme, strips trailing slash, and appends `WEBHOOK_PATH` (`/wp-json/qvapay/v1/webhook`) if not already present.
+
+The readonly `webhook_url` field exists only for display. `validate_webhook_url_field()` discards whatever the browser submits and re-derives the value from the override, so the stored `webhook_url` always matches what `get_webhook_url()` would return — there's no way for it to drift out of sync with the override.
+
+The override exists because `rest_url()` resolves against `home_url()`, which is wrong when the admin browses the site through a different host than the public one (typical with Cloudflare Tunnel / ngrok / reverse proxy without proper `X-Forwarded-Host`).
 
 ## Webhook contract (critical)
 
@@ -32,6 +54,8 @@ The webhook handler in `includes/class-qvapay-webhook.php` enforces, in order:
 - Order lookup via `remote_id` (= WC order id). If `_qvapay_transaction_uuid` is stored on the order, it must match the incoming uuid.
 - Idempotency: if the order `is_paid()` or status is `processing` / `completed` / `refunded`, the handler returns 200 with `already_processed=true` and does **not** call `payment_complete()` again. Preserve this — QvaPay retries.
 - Only `status === 'paid'` triggers `$order->payment_complete($uuid)`; other statuses are logged and acknowledged with 200.
+
+The qpweb backend signs the webhook via `sendAppWebhook(url, payload, { app_id, secret })` — the `secret` arg is what triggers `x-qvapay-signature` + `x-qvapay-timestamp` headers in `scripts/webhook.js`. Callers must pass `secret: transaction.App.secret`. Adding the headers is backward-compatible: existing merchants that don't validate them simply ignore the extra headers.
 
 Rejections return non-2xx via `self::reject()` so QvaPay will retry. Webhooks for unknown orders return 200 (no point retrying) but log an error.
 

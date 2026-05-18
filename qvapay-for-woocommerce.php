@@ -45,6 +45,7 @@ function qvapay_wc_bootstrap() {
     require_once QVAPAY_WC_PLUGIN_DIR . 'includes/class-qvapay-api-client.php';
     require_once QVAPAY_WC_PLUGIN_DIR . 'includes/class-qvapay-gateway.php';
     require_once QVAPAY_WC_PLUGIN_DIR . 'includes/class-qvapay-webhook.php';
+    require_once QVAPAY_WC_PLUGIN_DIR . 'includes/class-qvapay-blocks-integration.php';
     require_once QVAPAY_WC_PLUGIN_DIR . 'includes/class-qvapay-plugin.php';
 
     QvaPay_Plugin::instance();
@@ -60,6 +61,11 @@ add_action( 'before_woocommerce_init', function () {
     if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
         \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
             'custom_order_tables',
+            __FILE__,
+            true
+        );
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
+            'cart_checkout_blocks',
             __FILE__,
             true
         );

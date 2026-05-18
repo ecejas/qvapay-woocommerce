@@ -32,6 +32,7 @@ SHIP=(
 	"LICENSE"
 	"includes"
 	"assets/images"
+	"assets/js"
 	"languages"
 )
 
