@@ -190,9 +190,16 @@ class QvaPay_Webhook {
     // the server if the PHP process dies mid-request. Returns the lock name, or null on timeout.
     private static function lock_order( $order_id ) {
         global $wpdb;
-        $name = $wpdb->prefix . 'qvapay_order_' . $order_id;
+        $name = self::order_lock_name( $order_id, $wpdb->dbname, $wpdb->prefix );
         $got  = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', $name, self::ORDER_LOCK_TIMEOUT ) );
         return '1' === (string) $got ? $name : null;
+    }
+
+    // GET_LOCK names are server-wide, not per database: two stores on one MySQL server can
+    // share the table prefix and the order ids, so the database is part of the name. Hashed
+    // to stay well inside the 64-character limit.
+    private static function order_lock_name( $order_id, $database, $prefix ) {
+        return 'qvapay_' . substr( md5( $database . '|' . $prefix ), 0, 16 ) . '_' . (int) $order_id;
     }
 
     private static function unlock_order( $name ) {

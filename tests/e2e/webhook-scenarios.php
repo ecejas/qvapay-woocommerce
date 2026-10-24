@@ -285,7 +285,22 @@ qvapay_e2e_expect( 'delivery that timed out waiting', $full, '503 order_busy' );
 qvapay_e2e_expect( 'QvaPay retry of the 40 invoice', qvapay_e2e_webhook( $order, $b['uuid'], $b['amount'] ), '200 received' );
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
 
-WP_CLI::log( '12. Webhook signed with the wrong secret' );
+WP_CLI::log( '12. Another store on the same MySQL server (own database, same wp_ prefix) holds the lock for the same order id' );
+$order = qvapay_e2e_order( '25.00' );
+$a     = qvapay_e2e_checkout( $order );
+// The name that store's copy of the plugin uses for this order id: same code, its own database
+$name_for = new ReflectionMethod( 'QvaPay_Webhook', 'order_lock_name' );
+$name_for->setAccessible( true );
+global $wpdb;
+$foreign_name = $name_for->invoke( null, $order, 'otherstore', $wpdb->prefix );
+$foreign      = new mysqli( 'db', 'otherstore', 'otherstore', 'otherstore' );
+$held         = $foreign->query( "SELECT GET_LOCK('" . $foreign->real_escape_string( $foreign_name ) . "', 0)" )->fetch_row()[0];
+qvapay_e2e_expect( 'other store holds its lock', (string) $held, '1' );
+qvapay_e2e_expect( 'webhook for this store', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'] ), '200 received' );
+qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
+$foreign->close();
+
+WP_CLI::log( '13. Webhook signed with the wrong secret' );
 $order = qvapay_e2e_order( '25.00' );
 $a     = qvapay_e2e_checkout( $order );
 qvapay_e2e_expect( 'forged webhook', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'], 'not-the-secret' ), '401 signature_mismatch' );

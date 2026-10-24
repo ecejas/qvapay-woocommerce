@@ -15,6 +15,9 @@ wp() { docker compose exec -T cli wp "$@"; }
 
 echo "Waiting for the database…"
 for _ in $(seq 1 60); do wp db check >/dev/null 2>&1 && break; sleep 1; done
+# A second store on the same MySQL server (own database and user), for the lock-name scenario
+docker compose exec -T db mariadb -uroot -proot -e \
+	"CREATE DATABASE otherstore; CREATE USER 'otherstore'@'%' IDENTIFIED BY 'otherstore'; GRANT ALL ON otherstore.* TO 'otherstore'@'%';"
 
 wp core install --url=http://wp --title=QvaPay-E2E --admin_user=admin \
 	--admin_password="$(openssl rand -hex 12)" --admin_email=admin@example.test --skip-email
