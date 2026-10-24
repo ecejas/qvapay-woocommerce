@@ -74,17 +74,53 @@ class QvaPay_Webhook {
             return self::reject( 'wrong_payment_method', 400 );
         }
 
+        $invoices    = $order->get_meta( QvaPay_Gateway::ORDER_META_INVOICES );
+        $invoices    = is_array( $invoices ) ? $invoices : array();
         $stored_uuid = $order->get_meta( QvaPay_Gateway::ORDER_META_TXN_UUID );
-        if ( $stored_uuid && $stored_uuid !== $uuid ) {
-            QvaPay_Logger::error( sprintf( 'uuid mismatch order %s: stored=%s received=%s', $remote_id, $stored_uuid, $uuid ) );
+        // Orders created before invoices were tracked only know their last uuid
+        if ( $stored_uuid && ! array_key_exists( $stored_uuid, $invoices ) ) {
+            $invoices[ $stored_uuid ] = null;
+        }
+        if ( $invoices && ! array_key_exists( $uuid, $invoices ) ) {
+            QvaPay_Logger::error( sprintf( 'uuid mismatch order %s: issued=%s received=%s', $remote_id, implode( ',', array_keys( $invoices ) ), $uuid ) );
             return self::reject( 'uuid_mismatch', 400 );
         }
 
         if ( $order->is_paid() || in_array( $order->get_status(), array( 'processing', 'completed', 'refunded' ), true ) ) {
+            $paid_with = $order->get_transaction_id();
+            if ( 'paid' === $status && $paid_with && $paid_with !== $uuid ) {
+                $order->add_order_note(
+                    sprintf(
+                        /* translators: 1: transaction UUID, 2: amount in USD, 3: UUID the order was already paid with */
+                        __( 'QvaPay: se recibió otro pago (UUID: %1$s, %2$s USD) para este pedido, que ya estaba pagado con %3$s. Revisa si hay que devolverlo.', 'qvapay-for-woocommerce' ),
+                        $uuid,
+                        $amount,
+                        $paid_with
+                    )
+                );
+                QvaPay_Logger::error( sprintf( 'order %s already paid with %s, second payment %s', $remote_id, $paid_with, $uuid ) );
+            }
             return new WP_REST_Response( array( 'received' => true, 'already_processed' => true ), 200 );
         }
 
         if ( 'paid' === $status ) {
+            // An earlier invoice can be for less than the current total if the order changed since
+            $invoiced = isset( $invoices[ $uuid ] ) ? (float) $invoices[ $uuid ] : null;
+            if ( null !== $invoiced && round( $invoiced, 2 ) < round( (float) $order->get_total(), 2 ) ) {
+                $order->update_status(
+                    'on-hold',
+                    sprintf(
+                        /* translators: 1: transaction UUID, 2: invoiced amount in USD, 3: order total in USD */
+                        __( 'QvaPay: se pagó la factura %1$s por %2$s USD, menos que el total actual del pedido (%3$s USD). Revísalo antes de enviarlo.', 'qvapay-for-woocommerce' ),
+                        $uuid,
+                        $invoiced,
+                        $order->get_total()
+                    )
+                );
+                QvaPay_Logger::error( sprintf( 'order %s: invoice %s paid %s USD, order total %s USD', $remote_id, $uuid, $invoiced, $order->get_total() ) );
+                return new WP_REST_Response( array( 'received' => true, 'amount_short' => true ), 200 );
+            }
+
             $order->payment_complete( $uuid );
             $order->add_order_note(
                 sprintf(

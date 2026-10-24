@@ -6,6 +6,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 class QvaPay_Gateway extends WC_Payment_Gateway {
 
     const ORDER_META_TXN_UUID = '_qvapay_transaction_uuid';
+    // Every invoice issued for the order (uuid => amount). "Pay for this order" issues a
+    // new one each time, and the customer may still pay an earlier one.
+    const ORDER_META_INVOICES = '_qvapay_invoices';
     const WEBHOOK_PATH        = '/wp-json/qvapay/v1/webhook';
 
     public function __construct() {
@@ -208,7 +211,13 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
             return array( 'result' => 'fail' );
         }
 
-        $order->update_meta_data( self::ORDER_META_TXN_UUID, sanitize_text_field( $response['transaction_uuid'] ) );
+        $uuid     = sanitize_text_field( $response['transaction_uuid'] );
+        $invoices = $order->get_meta( self::ORDER_META_INVOICES );
+        $invoices = is_array( $invoices ) ? $invoices : array();
+
+        $invoices[ $uuid ] = $amount;
+        $order->update_meta_data( self::ORDER_META_INVOICES, $invoices );
+        $order->update_meta_data( self::ORDER_META_TXN_UUID, $uuid );
         $order->update_status(
             'pending',
             sprintf(

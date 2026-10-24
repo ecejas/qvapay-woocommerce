@@ -63,8 +63,9 @@ Reglas de aceptación (en orden):
 3. Firma calculada sobre el cuerpo **crudo** y comparada con `hash_equals` → mismatch, 401.
 4. JSON válido con `transaction_uuid`, `remote_id`, `status` → faltante, 400.
 5. Pedido existe y su `payment_method == 'qvapay'`.
-6. Si el pedido ya está en `processing` / `completed` / `refunded` → 200 con `already_processed=true` (idempotencia).
-7. `status == 'paid'` → `payment_complete()` y nota de pedido. Otros estados se acusan con 200 y se loguean.
+6. El `transaction_uuid` tiene que ser una de las facturas emitidas para ese pedido → si no, 400 (`uuid_mismatch`).
+7. Si el pedido ya está en `processing` / `completed` / `refunded` → 200 con `already_processed=true` (idempotencia). Si llega pagada OTRA factura del mismo pedido, se deja una nota para revisar la devolución.
+8. `status == 'paid'` → `payment_complete()` y nota de pedido, salvo que la factura pagada sea por menos del total actual del pedido: entonces queda `on-hold` con una nota. Otros estados se acusan con 200 y se loguean.
 
 ## Configuración
 
@@ -81,14 +82,14 @@ Los ajustes viven en la opción `woocommerce_qvapay_settings`:
 | `webhook_url` | URL de webhook efectiva (solo lectura). Es la que se envía a QvaPay y la que debes copiar al *Callback URL*. |
 | `debug`       | Registra peticiones y webhooks en *WooCommerce → Status → Logs*.            |
 
-Estado por pedido: el UUID de la factura QvaPay se guarda en el meta `_qvapay_transaction_uuid`.
+Estado por pedido: cada factura QvaPay emitida se guarda en el meta `_qvapay_invoices` (`uuid => monto`) y la última también en `_qvapay_transaction_uuid`. «Pagar este pedido» en WooCommerce emite una factura nueva cada vez, y el cliente puede pagar cualquiera de ellas.
 
 ## Seguridad
 
 - Firma `x-qvapay-signature` verificada con `hash_equals` (comparación timing-safe).
 - Validación del timestamp `x-qvapay-timestamp` con ventana de ±5 minutos (mitiga ataques de replay).
 - Idempotencia por estado: pedidos en `processing`/`completed`/`refunded` no se reprocesan.
-- Si el `transaction_uuid` recibido no coincide con el guardado en el pedido, el webhook se rechaza con 400.
+- Si el `transaction_uuid` recibido no es una de las facturas emitidas para el pedido, el webhook se rechaza con 400.
 - El `app-secret` se almacena como password en los ajustes de WooCommerce.
 
 ## Alcance v1
