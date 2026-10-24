@@ -24,12 +24,15 @@ function qvapay_e2e_expect( $label, $actual, $expected ) {
 
 function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null ) {
     $secret = $secret ?? get_option( 'woocommerce_qvapay_settings' )['app_secret'];
-    $raw    = wp_json_encode( array(
+    $payload = array(
         'transaction_uuid' => $uuid,
         'remote_id'        => (string) $order_id,
         'status'           => 'paid',
-        'amount'           => $amount,
-    ) );
+    );
+    if ( null !== $amount ) {
+        $payload['amount'] = $amount;
+    }
+    $raw = wp_json_encode( $payload );
     $res = wp_remote_post( 'http://wp/?rest_route=/qvapay/v1/webhook', array(
         'timeout' => 20,
         'headers' => array(
@@ -60,6 +63,18 @@ function qvapay_e2e_order( $total ) {
     $order->calculate_totals();
     $order->save();
     return $order->get_id();
+}
+
+// An admin editing a pending order: adds a line and recalculates the total
+function qvapay_e2e_raise_total( $order_id, $extra_price ) {
+    $extra = new WC_Product_Simple();
+    $extra->set_name( 'Extra' );
+    $extra->set_regular_price( $extra_price );
+    $extra->save();
+    $order = wc_get_order( $order_id );
+    $order->add_product( $extra, 1 );
+    $order->calculate_totals();
+    $order->save();
 }
 
 function qvapay_e2e_checkout( $order_id ) {
@@ -112,14 +127,15 @@ function qvapay_e2e_status( $order_id ) {
     return $order->get_status() . ( $order->is_paid() ? ' (paid)' : '' );
 }
 
-function qvapay_e2e_has_note( $order_id, $needle ) {
+function qvapay_e2e_notes( $order_id, $needle ) {
     wp_cache_flush();
+    $count = 0;
     foreach ( wc_get_order_notes( array( 'order_id' => $order_id ) ) as $note ) {
         if ( false !== strpos( $note->content, $needle ) ) {
-            return 'yes';
+            $count++;
         }
     }
-    return 'no';
+    return $count . ' note(s)';
 }
 
 WC()->frontend_includes();
@@ -154,24 +170,19 @@ $a     = qvapay_e2e_checkout( $order );
 $b     = qvapay_e2e_pay_for_order( $order );
 qvapay_e2e_expect( 'webhook for invoice A', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'] ), '200 received' );
 qvapay_e2e_expect( 'webhook for invoice B', qvapay_e2e_webhook( $order, $b['uuid'], $b['amount'] ), '200 received,already_processed' );
+qvapay_e2e_expect( 'webhook for invoice B, delivered again', qvapay_e2e_webhook( $order, $b['uuid'], $b['amount'] ), '200 received,already_processed' );
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
-qvapay_e2e_expect( 'note about the second payment', qvapay_e2e_has_note( $order, $b['uuid'] . ', 25 USD) para este pedido, que ya estaba pagado con ' . $a['uuid'] ), 'yes' );
+qvapay_e2e_expect( 'refund-review note for invoice B', qvapay_e2e_notes( $order, $b['uuid'] . ', 25 USD) para este pedido, que ya estaba pagado con ' . $a['uuid'] ), '1 note(s)' );
 
 WP_CLI::log( '4. Total raised from 25 to 40 between invoices; customer pays the 25 invoice' );
 $order = qvapay_e2e_order( '25.00' );
 $a     = qvapay_e2e_checkout( $order );
-$extra = new WC_Product_Simple();
-$extra->set_name( 'Extra' );
-$extra->set_regular_price( '15.00' );
-$extra->save();
-$edited = wc_get_order( $order );
-$edited->add_product( $extra, 1 );
-$edited->calculate_totals();
-$edited->save();
+qvapay_e2e_raise_total( $order, '15.00' );
 $b = qvapay_e2e_pay_for_order( $order );
 qvapay_e2e_expect( 'webhook for the 25 invoice', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'] ), '200 received,amount_short' );
+qvapay_e2e_expect( 'webhook for the 25 invoice, delivered again', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'] ), '200 received,amount_short' );
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'on-hold' );
-qvapay_e2e_expect( 'note about the short invoice', qvapay_e2e_has_note( $order, 'menos que el total actual del pedido (40.00 USD)' ), 'yes' );
+qvapay_e2e_expect( 'note about the short invoice', qvapay_e2e_notes( $order, 'menos que el total actual del pedido (40.00 USD)' ), '1 note(s)' );
 qvapay_e2e_expect( 'webhook for the 40 invoice', qvapay_e2e_webhook( $order, $b['uuid'], $b['amount'] ), '200 received' );
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
 
@@ -203,7 +214,23 @@ qvapay_e2e_pay_for_order( $order );
 qvapay_e2e_expect( 'webhook for the pre-upgrade invoice', qvapay_e2e_webhook( $order, 'eeeeeeee-0000-4000-8000-000000000003', 25 ), '200 received' );
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
 
-WP_CLI::log( '8. Webhook signed with the wrong secret' );
+// The legacy invoice's amount was never stored: only the signed webhook can vouch for it
+WP_CLI::log( '8. Order from v1.0.0 for 25, raised to 40, "Pay for this order" after upgrading, customer pays the 25 pre-upgrade invoice' );
+$order = qvapay_e2e_legacy_order( 'eeeeeeee-0000-4000-8000-000000000004' );
+qvapay_e2e_raise_total( $order, '15.00' );
+qvapay_e2e_pay_for_order( $order );
+qvapay_e2e_expect( 'webhook for the 25 pre-upgrade invoice', qvapay_e2e_webhook( $order, 'eeeeeeee-0000-4000-8000-000000000004', 25 ), '200 received,amount_short' );
+qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'on-hold' );
+qvapay_e2e_expect( 'note about the short invoice', qvapay_e2e_notes( $order, 'menos que el total actual del pedido (40.00 USD)' ), '1 note(s)' );
+
+WP_CLI::log( '9. Order from v1.0.0, "Pay for this order" after upgrading, pre-upgrade invoice paid by a webhook without an amount' );
+$order = qvapay_e2e_legacy_order( 'eeeeeeee-0000-4000-8000-000000000005' );
+qvapay_e2e_pay_for_order( $order );
+qvapay_e2e_expect( 'webhook without amount', qvapay_e2e_webhook( $order, 'eeeeeeee-0000-4000-8000-000000000005', null ), '200 received,amount_unverified' );
+qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'on-hold' );
+qvapay_e2e_expect( 'note about the unverified amount', qvapay_e2e_notes( $order, 'no se pudo verificar el monto' ), '1 note(s)' );
+
+WP_CLI::log( '10. Webhook signed with the wrong secret' );
 $order = qvapay_e2e_order( '25.00' );
 $a     = qvapay_e2e_checkout( $order );
 qvapay_e2e_expect( 'forged webhook', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'], 'not-the-secret' ), '401 signature_mismatch' );

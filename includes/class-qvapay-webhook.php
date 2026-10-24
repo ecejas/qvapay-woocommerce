@@ -88,7 +88,13 @@ class QvaPay_Webhook {
 
         if ( $order->is_paid() || in_array( $order->get_status(), array( 'processing', 'completed', 'refunded' ), true ) ) {
             $paid_with = $order->get_transaction_id();
-            if ( 'paid' === $status && $paid_with && $paid_with !== $uuid ) {
+            $reported  = $order->get_meta( QvaPay_Gateway::ORDER_META_EXTRA_PAYMENTS );
+            $reported  = is_array( $reported ) ? $reported : array();
+            // QvaPay can deliver the same webhook more than once: flag each extra payment once
+            if ( 'paid' === $status && $paid_with && $paid_with !== $uuid && ! in_array( $uuid, $reported, true ) ) {
+                $reported[] = $uuid;
+                $order->update_meta_data( QvaPay_Gateway::ORDER_META_EXTRA_PAYMENTS, $reported );
+                $order->save();
                 $order->add_order_note(
                     sprintf(
                         /* translators: 1: transaction UUID, 2: amount in USD, 3: UUID the order was already paid with */
@@ -104,9 +110,28 @@ class QvaPay_Webhook {
         }
 
         if ( 'paid' === $status ) {
-            // An earlier invoice can be for less than the current total if the order changed since
-            $invoiced = isset( $invoices[ $uuid ] ) ? (float) $invoices[ $uuid ] : null;
-            if ( null !== $invoiced && round( $invoiced, 2 ) < round( (float) $order->get_total(), 2 ) ) {
+            // An earlier invoice can be for less than the current total if the order changed since.
+            // What we invoiced is the reference; an invoice issued before amounts were stored
+            // (v1.0.0) falls back to the amount in the signed webhook, and with neither the
+            // payment cannot be verified, so it is held instead of completing the order.
+            if ( isset( $invoices[ $uuid ] ) ) {
+                $invoiced = (float) $invoices[ $uuid ];
+            } elseif ( is_numeric( $amount ) ) {
+                $invoiced = (float) $amount;
+            } else {
+                $order->update_status(
+                    'on-hold',
+                    sprintf(
+                        /* translators: %s: transaction UUID */
+                        __( 'QvaPay: se pagó la factura %s, pero no se pudo verificar el monto pagado (el webhook no lo incluye). Revisa el pago en QvaPay antes de enviar el pedido.', 'qvapay-for-woocommerce' ),
+                        $uuid
+                    )
+                );
+                QvaPay_Logger::error( sprintf( 'order %s: invoice %s paid without a verifiable amount', $remote_id, $uuid ) );
+                return new WP_REST_Response( array( 'received' => true, 'amount_unverified' => true ), 200 );
+            }
+
+            if ( round( $invoiced, 2 ) < round( (float) $order->get_total(), 2 ) ) {
                 $order->update_status(
                     'on-hold',
                     sprintf(

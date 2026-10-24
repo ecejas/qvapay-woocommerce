@@ -9,6 +9,8 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
     // Every invoice issued for the order (uuid => amount). "Pay for this order" issues a
     // new one each time, and the customer may still pay an earlier one.
     const ORDER_META_INVOICES = '_qvapay_invoices';
+    // Invoices paid after the order was already paid, already flagged with a note
+    const ORDER_META_EXTRA_PAYMENTS = '_qvapay_extra_payments';
     const WEBHOOK_PATH        = '/wp-json/qvapay/v1/webhook';
 
     public function __construct() {
