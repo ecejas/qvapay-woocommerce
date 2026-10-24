@@ -214,6 +214,12 @@ class QvaPay_Gateway extends WC_Payment_Gateway {
         $uuid     = sanitize_text_field( $response['transaction_uuid'] );
         $invoices = $order->get_meta( self::ORDER_META_INVOICES );
         $invoices = is_array( $invoices ) ? $invoices : array();
+        // An invoice issued before the map existed lives only in the single field we are
+        // about to overwrite: carry it over (amount unknown) so it stays payable
+        $previous = $order->get_meta( self::ORDER_META_TXN_UUID );
+        if ( $previous && ! array_key_exists( $previous, $invoices ) ) {
+            $invoices[ $previous ] = null;
+        }
 
         $invoices[ $uuid ] = $amount;
         $order->update_meta_data( self::ORDER_META_INVOICES, $invoices );

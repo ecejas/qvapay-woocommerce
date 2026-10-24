@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 WordPress plugin: WooCommerce payment gateway for [QvaPay](https://www.qvapay.com). Single-flow integration (invoice + redirect) using QvaPay's merchants API v2. USD-only.
 
-Plain PHP loaded by WordPress — no `composer.json`, no `package.json`, no test suite. Don't introduce one unless asked. The only tooling is `build.sh` (produces the release zip) and `.github/workflows/release.yml` (attaches the zip to a GitHub Release when a `v*` tag is pushed).
+Plain PHP loaded by WordPress — no `composer.json`, no `package.json`, no unit-test framework. Don't introduce one unless asked. Tooling: `build.sh` (produces the release zip), `.github/workflows/release.yml` (attaches the zip to a GitHub Release when a `v*` tag is pushed), and `tests/e2e/run.sh` — end-to-end webhook scenarios against a throwaway WordPress + WooCommerce in Docker (checkout, WooCommerce's real "Pay for this order" handler, signed webhooks over HTTP; QvaPay's `create_invoice` is stubbed by `tests/e2e/mu-plugins/`). Run it after touching `process_payment()` or the webhook; it exits non-zero on any failed expectation. `tests/` is not shipped (not in `SHIP`, `export-ignore`d).
 
 ## Architecture
 
