@@ -6,6 +6,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 class QvaPay_Webhook {
 
     const TIMESTAMP_TOLERANCE = 300;
+    // Seconds a delivery waits for another one on the same order before asking QvaPay to retry
+    const ORDER_LOCK_TIMEOUT = 10;
 
     public static function register_routes() {
         register_rest_route(
@@ -64,6 +66,25 @@ class QvaPay_Webhook {
             return self::reject( 'missing_payload_fields', 400 );
         }
 
+        // One delivery at a time per order: overlapping webhooks (two invoices of the same
+        // order, or a redelivery) must not interleave their "already paid?" checks with
+        // each other's status changes
+        $lock = self::lock_order( (int) $remote_id );
+        if ( null === $lock ) {
+            QvaPay_Logger::error( sprintf( 'order %s busy, webhook for %s deferred', $remote_id, $uuid ) );
+            return self::reject( 'order_busy', 503 );
+        }
+
+        try {
+            return self::apply_to_order( $uuid, $remote_id, $status, $amount );
+        } finally {
+            self::unlock_order( $lock );
+        }
+    }
+
+    // Runs under the order's lock, and the order is loaded here (not before), so it reflects
+    // everything a concurrent delivery for it has already saved.
+    private static function apply_to_order( $uuid, $remote_id, $status, $amount ) {
         $order = wc_get_order( (int) $remote_id );
         if ( ! $order ) {
             QvaPay_Logger::error( sprintf( 'webhook for unknown order %s (txn %s)', $remote_id, $uuid ) );
@@ -163,6 +184,20 @@ class QvaPay_Webhook {
 
         QvaPay_Logger::log( sprintf( 'webhook status=%s for order %s ignored', $status, $remote_id ) );
         return new WP_REST_Response( array( 'received' => true, 'ignored_status' => $status ), 200 );
+    }
+
+    // MySQL/MariaDB named lock (WooCommerce's supported databases): released explicitly, or by
+    // the server if the PHP process dies mid-request. Returns the lock name, or null on timeout.
+    private static function lock_order( $order_id ) {
+        global $wpdb;
+        $name = $wpdb->prefix . 'qvapay_order_' . $order_id;
+        $got  = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', $name, self::ORDER_LOCK_TIMEOUT ) );
+        return '1' === (string) $got ? $name : null;
+    }
+
+    private static function unlock_order( $name ) {
+        global $wpdb;
+        $wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
     }
 
     private static function reject( $code, $http_status ) {

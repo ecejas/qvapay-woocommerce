@@ -25,3 +25,24 @@ add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
         'filename' => null,
     );
 }, 10, 3 );
+
+/*
+ * E2E only: lets a scenario overlap two webhook deliveries at a precise point.
+ *  - X-QvaPay-E2E-Start-Delay: <ms>  pauses the request before the webhook handler runs.
+ *  - X-QvaPay-E2E-Amount-Delay: <ms> pauses it the first time the order total is read,
+ *    which in the handler is the amount check, after the "already paid?" check.
+ */
+add_filter( 'rest_pre_dispatch', function ( $result ) {
+    if ( isset( $_SERVER['HTTP_X_QVAPAY_E2E_START_DELAY'] ) ) {
+        usleep( 1000 * (int) $_SERVER['HTTP_X_QVAPAY_E2E_START_DELAY'] );
+    }
+    return $result;
+} );
+add_filter( 'woocommerce_order_get_total', function ( $total ) {
+    static $paused = false;
+    if ( ! $paused && isset( $_SERVER['HTTP_X_QVAPAY_E2E_AMOUNT_DELAY'] ) ) {
+        $paused = true;
+        usleep( 1000 * (int) $_SERVER['HTTP_X_QVAPAY_E2E_AMOUNT_DELAY'] );
+    }
+    return $total;
+} );

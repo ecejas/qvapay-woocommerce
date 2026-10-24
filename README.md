@@ -62,10 +62,11 @@ Reglas de aceptación (en orden):
 2. `|now − timestamp| ≤ 300 s` → fuera de rango, 401.
 3. Firma calculada sobre el cuerpo **crudo** y comparada con `hash_equals` → mismatch, 401.
 4. JSON válido con `transaction_uuid`, `remote_id`, `status` → faltante, 400.
-5. Pedido existe y su `payment_method == 'qvapay'`.
-6. El `transaction_uuid` tiene que ser una de las facturas emitidas para ese pedido → si no, 400 (`uuid_mismatch`).
-7. Si el pedido ya está en `processing` / `completed` / `refunded` → 200 con `already_processed=true` (idempotencia). Si llega pagada OTRA factura del mismo pedido, se deja una nota (una sola, aunque QvaPay reenvíe el webhook) para revisar la devolución.
-8. `status == 'paid'` → `payment_complete()` y nota de pedido, salvo que el monto pagado sea menor que el total actual del pedido: entonces queda `on-hold` con una nota. El monto es el de la factura al emitirla; para facturas emitidas por la v1.0.0 (sin monto guardado) se usa el `amount` del webhook firmado, y si tampoco viene, el pedido queda `on-hold` para revisión. Otros estados se acusan con 200 y se loguean.
+5. Los webhooks de un mismo pedido se procesan de uno en uno (bloqueo por pedido en la base de datos): dos facturas del mismo pedido o un reenvío no se pisan. Si otro webhook del pedido sigue en curso más de 10 s → 503 (`order_busy`) y QvaPay reintenta.
+6. Pedido existe y su `payment_method == 'qvapay'`.
+7. El `transaction_uuid` tiene que ser una de las facturas emitidas para ese pedido → si no, 400 (`uuid_mismatch`).
+8. Si el pedido ya está en `processing` / `completed` / `refunded` → 200 con `already_processed=true` (idempotencia). Si llega pagada OTRA factura del mismo pedido, se deja una nota (una sola, aunque QvaPay reenvíe el webhook) para revisar la devolución.
+9. `status == 'paid'` → `payment_complete()` y nota de pedido, salvo que el monto pagado sea menor que el total actual del pedido: entonces queda `on-hold` con una nota. El monto es el de la factura al emitirla; para facturas emitidas por la v1.0.0 (sin monto guardado) se usa el `amount` del webhook firmado, y si tampoco viene, el pedido queda `on-hold` para revisión. Otros estados se acusan con 200 y se loguean.
 
 ## Configuración
 

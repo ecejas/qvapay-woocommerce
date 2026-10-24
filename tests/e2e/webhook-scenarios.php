@@ -22,8 +22,8 @@ function qvapay_e2e_expect( $label, $actual, $expected ) {
     WP_CLI::log( "   FAIL  {$label}: got {$actual}, expected {$expected}" );
 }
 
-function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null ) {
-    $secret = $secret ?? get_option( 'woocommerce_qvapay_settings' )['app_secret'];
+function qvapay_e2e_signed_body( $order_id, $uuid, $amount, $secret = null ) {
+    $secret  = $secret ?? get_option( 'woocommerce_qvapay_settings' )['app_secret'];
     $payload = array(
         'transaction_uuid' => $uuid,
         'remote_id'        => (string) $order_id,
@@ -33,21 +33,47 @@ function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null ) {
         $payload['amount'] = $amount;
     }
     $raw = wp_json_encode( $payload );
-    $res = wp_remote_post( 'http://wp/?rest_route=/qvapay/v1/webhook', array(
-        'timeout' => 20,
+    return array(
+        'body'    => $raw,
         'headers' => array(
             'Content-Type'       => 'application/json',
             'x-qvapay-signature' => 'sha256=' . hash_hmac( 'sha256', $raw, $secret ),
             'x-qvapay-timestamp' => (string) time(),
         ),
-        'body'    => $raw,
-    ) );
+    );
+}
+
+function qvapay_e2e_outcome( $code, $raw_body ) {
+    $body = json_decode( $raw_body, true );
+    $tag  = isset( $body['error'] ) ? $body['error'] : implode( ',', array_keys( array_filter( (array) $body ) ) );
+    return $code . ' ' . $tag;
+}
+
+function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null ) {
+    $req = qvapay_e2e_signed_body( $order_id, $uuid, $amount, $secret );
+    $res = wp_remote_post( 'http://wp/?rest_route=/qvapay/v1/webhook', array( 'timeout' => 20 ) + $req );
     if ( is_wp_error( $res ) ) {
         WP_CLI::error( 'webhook request failed: ' . $res->get_error_message() );
     }
-    $body = json_decode( wp_remote_retrieve_body( $res ), true );
-    $tag  = isset( $body['error'] ) ? $body['error'] : implode( ',', array_keys( array_filter( (array) $body ) ) );
-    return wp_remote_retrieve_response_code( $res ) . ' ' . $tag;
+    return qvapay_e2e_outcome( wp_remote_retrieve_response_code( $res ), wp_remote_retrieve_body( $res ) );
+}
+
+// Delivers several webhooks at the same time; $deliveries = [ [ order, uuid, amount, extra headers ], … ]
+function qvapay_e2e_webhooks_in_parallel( array $deliveries ) {
+    $requests = array();
+    foreach ( $deliveries as $i => list( $order_id, $uuid, $amount, $headers ) ) {
+        $req          = qvapay_e2e_signed_body( $order_id, $uuid, $amount );
+        $requests[ $i ] = array(
+            'url'     => 'http://wp/?rest_route=/qvapay/v1/webhook',
+            'type'    => 'POST',
+            'headers' => $req['headers'] + $headers,
+            'data'    => $req['body'],
+        );
+    }
+    $responses = WpOrg\Requests\Requests::request_multiple( $requests, array( 'timeout' => 30 ) );
+    return array_map( function ( $res ) {
+        return $res instanceof WpOrg\Requests\Response ? qvapay_e2e_outcome( $res->status_code, $res->body ) : 'ERR ' . $res->getMessage();
+    }, $responses );
 }
 
 function qvapay_e2e_order( $total ) {
@@ -230,7 +256,36 @@ qvapay_e2e_expect( 'webhook without amount', qvapay_e2e_webhook( $order, 'eeeeee
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'on-hold' );
 qvapay_e2e_expect( 'note about the unverified amount', qvapay_e2e_notes( $order, 'no se pudo verificar el monto' ), '1 note(s)' );
 
-WP_CLI::log( '10. Webhook signed with the wrong secret' );
+WP_CLI::log( '10. Overlapping deliveries: the 25 invoice is mid-check when the 40 invoice completes the 40 order' );
+$order = qvapay_e2e_order( '25.00' );
+$a     = qvapay_e2e_checkout( $order );
+qvapay_e2e_raise_total( $order, '15.00' );
+$b = qvapay_e2e_pay_for_order( $order );
+// A pauses 2.5 s right after its "already paid?" check; B starts 0.5 s later, inside that window
+list( $short, $full ) = qvapay_e2e_webhooks_in_parallel( array(
+    array( $order, $a['uuid'], $a['amount'], array( 'X-QvaPay-E2E-Amount-Delay' => '2500' ) ),
+    array( $order, $b['uuid'], $b['amount'], array( 'X-QvaPay-E2E-Start-Delay' => '500' ) ),
+) );
+WP_CLI::log( "   (25 invoice: {$short}; 40 invoice: {$full})" );
+qvapay_e2e_expect( 'order after both deliveries', qvapay_e2e_status( $order ), 'processing (paid)' );
+qvapay_e2e_expect( 'paid with the 40 invoice', wc_get_order( $order )->get_transaction_id(), $b['uuid'] );
+
+WP_CLI::log( '11. A delivery that waits longer than the order lock timeout is deferred with 503, and its retry succeeds' );
+$order = qvapay_e2e_order( '25.00' );
+$a     = qvapay_e2e_checkout( $order );
+qvapay_e2e_raise_total( $order, '15.00' );
+$b = qvapay_e2e_pay_for_order( $order );
+// A holds the order for 12 s, past the 10 s lock timeout B is willing to wait
+list( $short, $full ) = qvapay_e2e_webhooks_in_parallel( array(
+    array( $order, $a['uuid'], $a['amount'], array( 'X-QvaPay-E2E-Amount-Delay' => '12000' ) ),
+    array( $order, $b['uuid'], $b['amount'], array( 'X-QvaPay-E2E-Start-Delay' => '500' ) ),
+) );
+qvapay_e2e_expect( 'delivery holding the order', $short, '200 received,amount_short' );
+qvapay_e2e_expect( 'delivery that timed out waiting', $full, '503 order_busy' );
+qvapay_e2e_expect( 'QvaPay retry of the 40 invoice', qvapay_e2e_webhook( $order, $b['uuid'], $b['amount'] ), '200 received' );
+qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
+
+WP_CLI::log( '12. Webhook signed with the wrong secret' );
 $order = qvapay_e2e_order( '25.00' );
 $a     = qvapay_e2e_checkout( $order );
 qvapay_e2e_expect( 'forged webhook', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'], 'not-the-secret' ), '401 signature_mismatch' );
