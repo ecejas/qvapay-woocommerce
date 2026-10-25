@@ -49,8 +49,9 @@ function qvapay_e2e_outcome( $code, $raw_body ) {
     return $code . ' ' . $tag;
 }
 
-function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null ) {
-    $req = qvapay_e2e_signed_body( $order_id, $uuid, $amount, $secret );
+function qvapay_e2e_webhook( $order_id, $uuid, $amount, $secret = null, array $headers = array() ) {
+    $req             = qvapay_e2e_signed_body( $order_id, $uuid, $amount, $secret );
+    $req['headers'] += $headers;
     $res = wp_remote_post( 'http://wp/?rest_route=/qvapay/v1/webhook', array( 'timeout' => 20 ) + $req );
     if ( is_wp_error( $res ) ) {
         WP_CLI::error( 'webhook request failed: ' . $res->get_error_message() );
@@ -300,7 +301,15 @@ qvapay_e2e_expect( 'webhook for this store', qvapay_e2e_webhook( $order, $a['uui
 qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
 $foreign->close();
 
-WP_CLI::log( '13. Webhook signed with the wrong secret' );
+WP_CLI::log( '13. Database without named locks (GET_LOCK returns NULL, or errors): payments still complete' );
+foreach ( array( 'null', 'error' ) as $mode ) {
+    $order = qvapay_e2e_order( '25.00' );
+    $a     = qvapay_e2e_checkout( $order );
+    qvapay_e2e_expect( "webhook, GET_LOCK {$mode}", qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'], null, array( 'X-QvaPay-E2E-Named-Locks' => $mode ) ), '200 received' );
+    qvapay_e2e_expect( 'order', qvapay_e2e_status( $order ), 'processing (paid)' );
+}
+
+WP_CLI::log( '14. Webhook signed with the wrong secret' );
 $order = qvapay_e2e_order( '25.00' );
 $a     = qvapay_e2e_checkout( $order );
 qvapay_e2e_expect( 'forged webhook', qvapay_e2e_webhook( $order, $a['uuid'], $a['amount'], 'not-the-secret' ), '401 signature_mismatch' );

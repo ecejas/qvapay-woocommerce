@@ -46,3 +46,15 @@ add_filter( 'woocommerce_order_get_total', function ( $total ) {
     }
     return $total;
 } );
+
+/*
+ * E2E only: X-QvaPay-E2E-Named-Locks: null|error makes GET_LOCK behave like a database
+ * without named locks (some clusters and proxies): it returns NULL, or the query fails.
+ */
+add_filter( 'query', function ( $query ) {
+    $mode = isset( $_SERVER['HTTP_X_QVAPAY_E2E_NAMED_LOCKS'] ) ? $_SERVER['HTTP_X_QVAPAY_E2E_NAMED_LOCKS'] : '';
+    if ( '' === $mode || 0 !== strpos( ltrim( $query ), 'SELECT GET_LOCK(' ) ) {
+        return $query;
+    }
+    return 'error' === $mode ? 'SELECT GET_LOCK_UNSUPPORTED()' : 'SELECT NULL';
+} );

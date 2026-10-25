@@ -70,7 +70,7 @@ class QvaPay_Webhook {
         // order, or a redelivery) must not interleave their "already paid?" checks with
         // each other's status changes
         $lock = self::lock_order( (int) $remote_id );
-        if ( null === $lock ) {
+        if ( false === $lock ) {
             QvaPay_Logger::error( sprintf( 'order %s busy, webhook for %s deferred', $remote_id, $uuid ) );
             return self::reject( 'order_busy', 503 );
         }
@@ -78,7 +78,9 @@ class QvaPay_Webhook {
         try {
             return self::apply_to_order( $uuid, $remote_id, $status, $amount );
         } finally {
-            self::unlock_order( $lock );
+            if ( null !== $lock ) {
+                self::unlock_order( $lock );
+            }
         }
     }
 
@@ -186,13 +188,23 @@ class QvaPay_Webhook {
         return new WP_REST_Response( array( 'received' => true, 'ignored_status' => $status ), 200 );
     }
 
-    // MySQL/MariaDB named lock (WooCommerce's supported databases): released explicitly, or by
-    // the server if the PHP process dies mid-request. Returns the lock name, or null on timeout.
+    // MySQL/MariaDB named lock: released explicitly, or by the server if the PHP process dies
+    // mid-request. Returns the lock name, false if another delivery held it past the timeout,
+    // or null when the database offers no named locks (GET_LOCK yields NULL or an error, as
+    // on some clusters and proxies): then the webhook runs unserialized rather than every
+    // payment being refused.
     private static function lock_order( $order_id ) {
         global $wpdb;
         $name = self::order_lock_name( $order_id, $wpdb->dbname, $wpdb->prefix );
-        $got  = $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', $name, self::ORDER_LOCK_TIMEOUT ) );
-        return '1' === (string) $got ? $name : null;
+        $got  = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', $name, self::ORDER_LOCK_TIMEOUT ) );
+        if ( '1' === $got ) {
+            return $name;
+        }
+        if ( '0' === $got ) {
+            return false;
+        }
+        QvaPay_Logger::error( sprintf( 'named locks unavailable (%s), order %d processed unserialized', $wpdb->last_error ? $wpdb->last_error : 'GET_LOCK returned NULL', $order_id ) );
+        return null;
     }
 
     // GET_LOCK names are server-wide, not per database: two stores on one MySQL server can
